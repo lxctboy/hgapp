@@ -167,7 +167,7 @@ final class Downloads {
         Job(String source, String id, int episode, String type, String url, byte[] cencKey, String title, String cover) {
             this.source = source; this.id = id; this.episode = episode; this.type = type;
             this.url = url; this.cencKey = cencKey; this.title = title; this.cover = cover;
-            this.mime = "hls".equals(type) ? "application/x-mpegURL" : "video/mp4";
+            this.mime = "video/mp4"; // 两种来源最终都产出单个 mp4
         }
 
         void launch() {
@@ -215,8 +215,8 @@ final class Downloads {
                 header = java.util.Arrays.copyOf(probe.bytes, headerEnd);
             }
             MediaCrypto.Prepared prepared = MediaCrypto.INSTANCE.prepare(header, cencKey);
-            File out = new File(episodeDir(this), episode + ".mp4");
-            File part = new File(episodeDir(this), episode + ".mp4.part");
+            File out = new File(episodeDir(this), outputName(title, episode));
+            File part = new File(episodeDir(this), "." + episode + ".mp4.part");
             AtomicLong done = new AtomicLong();
             AtomicReference<Exception> failure = new AtomicReference<>();
             try (RandomAccessFile raf = new RandomAccessFile(part, "rw")) {
@@ -275,15 +275,12 @@ final class Downloads {
             }
             File dir = episodeDir(this);
             List<Segment> segments = new ArrayList<>();
-            StringBuilder local = new StringBuilder();
             Map<String, byte[]> keyCache = new ConcurrentHashMap<>();
             byte[] currentKey = null, currentIv = null;
             long sequence = 0;
-            boolean hasEndList = false;
-            String[] lines = playlist.split("\\r?\\n");
-            for (String raw : lines) {
+            for (String raw : playlist.split("\\r?\\n")) {
                 String line = raw.trim();
-                if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) { sequence = Long.parseLong(line.substring(line.indexOf(':') + 1).trim()); local.append(line).append('\n'); continue; }
+                if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) { sequence = Long.parseLong(line.substring(line.indexOf(':') + 1).trim()); continue; }
                 if (line.startsWith("#EXT-X-KEY")) {
                     String method = attribute(line, "METHOD");
                     if (method == null || method.equalsIgnoreCase("NONE")) { currentKey = null; currentIv = null; }
@@ -295,25 +292,92 @@ final class Downloads {
                         currentKey = cached;
                         currentIv = ivText != null ? hex(ivText) : null;
                     }
-                    continue; // segments are stored decrypted; drop the key line
+                    continue;
                 }
-                if (line.startsWith("#EXT-X-ENDLIST")) hasEndList = true;
-                if (line.isEmpty() || line.startsWith("#")) { local.append(line).append('\n'); continue; }
+                if (line.isEmpty() || line.startsWith("#")) continue;
                 Segment segment = new Segment();
                 segment.index = segments.size();
                 segment.uri = resolve(mediaUrl, line);
                 segment.key = currentKey;
                 segment.iv = currentKey == null ? null : currentIv != null ? currentIv : sequenceIv(sequence + segment.index);
                 segments.add(segment);
-                local.append(String.format(java.util.Locale.ROOT, "seg%04d.ts", segment.index)).append('\n');
             }
             if (segments.isEmpty()) throw new IllegalStateException("播放列表没有可下载的分段");
-            if (!hasEndList) local.append("#EXT-X-ENDLIST\n");
-            downloadSegments(dir, segments);
-            if (cancelled) return null;
-            File index = new File(dir, episode + ".m3u8");
-            try (java.io.FileOutputStream stream = new java.io.FileOutputStream(index)) { stream.write(local.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
-            return index;
+            // 分片下到临时目录,拼成一条 ts,再无损重封装为单个 mp4
+            File parts = new File(dir, "." + episode + ".parts");
+            parts.mkdirs();
+            try {
+                downloadSegments(parts, segments);
+                if (cancelled) return null;
+                File merged = new File(parts, "merged.ts");
+                concatSegments(parts, segments.size(), merged);
+                File tmpOut = new File(parts, "out.mp4");
+                remuxToMp4(merged, tmpOut);
+                if (cancelled) return null;
+                File out = new File(dir, outputName(title, episode));
+                out.delete();
+                if (!tmpOut.renameTo(out)) throw new IllegalStateException("保存失败");
+                return out;
+            } finally {
+                deleteRecursively(parts);
+            }
+        }
+
+        private void concatSegments(File dir, int count, File merged) throws Exception {
+            byte[] buffer = new byte[1 << 16];
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(merged)) {
+                for (int i = 0; i < count; i++) {
+                    if (cancelled) throw new java.io.IOException("已取消");
+                    File seg = new File(dir, String.format(java.util.Locale.ROOT, "seg%04d.ts", i));
+                    try (java.io.FileInputStream in = new java.io.FileInputStream(seg)) {
+                        int n; while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+                    }
+                }
+            }
+        }
+
+        private void remuxToMp4(File ts, File out) throws Exception {
+            android.media.MediaExtractor extractor = new android.media.MediaExtractor();
+            android.media.MediaMuxer muxer = null;
+            try {
+                extractor.setDataSource(ts.getAbsolutePath());
+                int trackCount = extractor.getTrackCount();
+                muxer = new android.media.MediaMuxer(out.getAbsolutePath(), android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+                int[] map = new int[trackCount];
+                java.util.Arrays.fill(map, -1);
+                int maxInput = 1 << 20, added = 0;
+                for (int i = 0; i < trackCount; i++) {
+                    android.media.MediaFormat format = extractor.getTrackFormat(i);
+                    String mime = format.getString(android.media.MediaFormat.KEY_MIME);
+                    if (mime == null || !(mime.startsWith("video/") || mime.startsWith("audio/"))) continue;
+                    extractor.selectTrack(i);
+                    map[i] = muxer.addTrack(format);
+                    added++;
+                    if (format.containsKey(android.media.MediaFormat.KEY_MAX_INPUT_SIZE))
+                        maxInput = Math.max(maxInput, format.getInteger(android.media.MediaFormat.KEY_MAX_INPUT_SIZE));
+                }
+                if (added == 0) throw new IllegalStateException("视频轨道解析失败,无法合并为 mp4");
+                muxer.start();
+                java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(maxInput);
+                android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+                while (!cancelled) {
+                    int track = extractor.getSampleTrackIndex();
+                    if (track < 0) break;
+                    int size = extractor.readSampleData(buffer, 0);
+                    if (size < 0) break;
+                    info.offset = 0;
+                    info.size = size;
+                    info.presentationTimeUs = extractor.getSampleTime();
+                    info.flags = (extractor.getSampleFlags() & android.media.MediaExtractor.SAMPLE_FLAG_SYNC) != 0
+                            ? android.media.MediaCodec.BUFFER_FLAG_KEY_FRAME : 0;
+                    if (map[track] >= 0) muxer.writeSampleData(map[track], buffer, info);
+                    extractor.advance();
+                }
+                if (!cancelled) muxer.stop();
+            } finally {
+                try { if (muxer != null) muxer.release(); } catch (Exception ignored) { }
+                extractor.release();
+            }
         }
 
         private void downloadSegments(File dir, List<Segment> segments) throws Exception {
@@ -377,5 +441,21 @@ final class Downloads {
         byte[] out = new byte[clean.length() / 2];
         for (int i = 0; i < out.length; i++) out[i] = (byte) Integer.parseInt(clean.substring(i * 2, i * 2 + 2), 16);
         return out;
+    }
+    /** 文件名 = 短剧名称 + 集数,非法字符剔除;名称为空时退回仅集数。 */
+    private static String outputName(String title, int episode) {
+        String base = sanitize(title);
+        return (base.isEmpty() ? "" : base + " ") + episode + ".mp4";
+    }
+    private static String sanitize(String value) {
+        if (value == null) return "";
+        String cleaned = value.replaceAll("[\\\\/:*?\"<>|\\r\\n\\t]", "").trim();
+        return cleaned.length() > 80 ? cleaned.substring(0, 80).trim() : cleaned;
+    }
+    private static void deleteRecursively(File file) {
+        if (file == null) return;
+        File[] children = file.listFiles();
+        if (children != null) for (File child : children) deleteRecursively(child);
+        file.delete();
     }
 }
