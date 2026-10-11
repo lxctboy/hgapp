@@ -42,17 +42,27 @@ final class VideoPlaybackCache {
         HlsMediaSource.Factory hls = new HlsMediaSource.Factory(type -> type == C.DATA_TYPE_MANIFEST
                 ? upstream.createDataSource() : cached.createDataSource());
         ProgressiveMediaSource.Factory mp4 = new ProgressiveMediaSource.Factory(HongguoPlayback.factory());
+        // Offline downloads are plain local files (decrypted MP4, or an HLS playlist with local segments).
+        DataSource.Factory local = new DefaultDataSource.Factory(context);
+        ProgressiveMediaSource.Factory localMp4 = new ProgressiveMediaSource.Factory(local);
+        HlsMediaSource.Factory localHls = new HlsMediaSource.Factory(local);
         return new MediaSource.Factory() {
             @Override public MediaSource createMediaSource(MediaItem item) {
+                if (item.localConfiguration != null && "file".equals(item.localConfiguration.uri.getScheme())) {
+                    return MimeTypes.VIDEO_MP4.equals(item.localConfiguration.mimeType)
+                            ? localMp4.createMediaSource(item) : localHls.createMediaSource(item);
+                }
                 return item.localConfiguration != null && MimeTypes.VIDEO_MP4.equals(item.localConfiguration.mimeType)
                         ? mp4.createMediaSource(item) : hls.createMediaSource(item);
             }
             @Override public int[] getSupportedTypes() { return new int[]{C.CONTENT_TYPE_HLS, C.CONTENT_TYPE_OTHER}; }
             @Override public MediaSource.Factory setDrmSessionManagerProvider(DrmSessionManagerProvider provider) {
-                hls.setDrmSessionManagerProvider(provider); mp4.setDrmSessionManagerProvider(provider); return this;
+                hls.setDrmSessionManagerProvider(provider); mp4.setDrmSessionManagerProvider(provider);
+                localHls.setDrmSessionManagerProvider(provider); localMp4.setDrmSessionManagerProvider(provider); return this;
             }
             @Override public MediaSource.Factory setLoadErrorHandlingPolicy(LoadErrorHandlingPolicy policy) {
-                hls.setLoadErrorHandlingPolicy(policy); mp4.setLoadErrorHandlingPolicy(policy); return this;
+                hls.setLoadErrorHandlingPolicy(policy); mp4.setLoadErrorHandlingPolicy(policy);
+                localHls.setLoadErrorHandlingPolicy(policy); localMp4.setLoadErrorHandlingPolicy(policy); return this;
             }
         };
     }

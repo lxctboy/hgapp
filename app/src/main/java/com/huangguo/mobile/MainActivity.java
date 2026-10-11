@@ -52,6 +52,7 @@ public final class MainActivity extends Activity {
     private FrameLayout root;
     private DualContentRepository repository;
     private AppStore store;
+    private Downloads downloads;
     private AccountService account;
     private UpdateManager updates;
     private HotUpdateManager hotUpdates;
@@ -187,6 +188,16 @@ public final class MainActivity extends Activity {
             }
         });
         webView.addJavascriptInterface(new Bridge(), "AndroidHost");
+        downloads = Downloads.get(this);
+        downloads.setListener((source, id, episode, percent, state, error) -> {
+            try {
+                JSONObject event = new JSONObject().put("source", source).put("id", id)
+                        .put("episode", episode).put("percent", percent).put("state", state);
+                if (error != null) event.put("error", error);
+                String script = "window.hgDownloadProgress && window.hgDownloadProgress(" + event + ")";
+                runOnUiThread(() -> { if (!isDestroyed() && webView != null) webView.evaluateJavascript(script, null); });
+            } catch (Exception ignored) { }
+        });
         webView.loadUrl(migratingOrigin ? "file:///android_asset/app.html" : HotUpdateManager.UI_URL);
         checkHotUpdates();
     }
@@ -586,6 +597,26 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> startActivity(intent));
                 return true;
             }
+            case "download-episode": {
+                String downloadId = args.optString("id");
+                int downloadEpisode = args.optInt("episode", 1);
+                String downloadSource = mode.active();
+                String downloadTitle = args.optString("title");
+                String downloadCover = args.optString("cover");
+                if (repository.isPrivate()) {
+                    JSONObject info = repository.episode(downloadId, downloadEpisode);
+                    downloads.start(downloadSource, downloadId, downloadEpisode, "hls", info.optString("source"), null,
+                            downloadTitle.isEmpty() ? info.optString("title") : downloadTitle,
+                            downloadCover.isEmpty() ? info.optString("cover") : downloadCover);
+                } else {
+                    com.hongguotv.core.StreamInfo info = repository.episodeStream(downloadId, downloadEpisode);
+                    downloads.start(downloadSource, downloadId, downloadEpisode, "mp4", info.getUrl(), info.getKey(), downloadTitle, downloadCover);
+                }
+                return true;
+            }
+            case "download-status": return downloads.status(mode.active(), args.optString("id"));
+            case "cancel-download": downloads.cancel(mode.active(), args.optString("id"), args.optInt("episode", 1)); return true;
+            case "delete-download": downloads.remove(mode.active(), args.optString("id"), args.optInt("episode", 1)); return true;
             default: throw new IllegalArgumentException("未知请求");
         }
     }

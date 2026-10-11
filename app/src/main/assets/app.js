@@ -4,6 +4,7 @@ const callbacks = new Map();
 let requestNumber = 0;
 let contentSource = 'hongguo';
 let contentReady;
+let downloadStates = {}, downloadStatusId = null;
 const bridgeInstance = Date.now() + '-' + Math.random().toString(36).slice(2);
 const privateMode = () => contentSource === 'huangguo';
 window.NativeCallbacks = {
@@ -863,13 +864,80 @@ function renderDetail() {
   const data = state.detail;
   if (!data) { renderSkeleton(); return; }
   const loading = state.detailLoading;
+  if (String(data.id) !== downloadStatusId) downloadStates = {};
   window.AndroidHost?.setDetailMode?.(true);
   const episodes = asArray(data.episodes);
   content.innerHTML = `<div class="detail-page"><button class="detail-back" type="button" data-back="1">${icon('back')} 返回</button>
     <div class="detail-art"><img data-cover="${esc(data.cover)}" alt=""></div><div class="detail-copy"><h1>${esc(data.title)}</h1><p>${loading ? '正在获取内容…' : `${esc(data.score)} ${esc(data.episodeLabel)}`}</p><p class="detail-description">${esc(data.description || '')}</p>
     <div class="detail-buttons"><button class="detail-play" type="button" data-play="1" ${loading ? 'disabled' : ''}>${loading ? '正在加载…' : '立即播放'}</button><button class="bookmark-button" type="button" data-bookmark="1" aria-label="${state.bookmarked ? '取消收藏' : '收藏'}" ${loading ? 'disabled' : ''}>${state.bookmarked ? '★' : '☆'}</button></div>
-    ${loading ? '<div class="detail-loading" role="status">正在获取选集…</div>' : episodes.length ? `<h2>选集</h2><div class="episode-grid">${episodes.map((item, index) => `<button type="button" data-episode="${item.number}" class="${index === 0 ? 'active' : ''}">${item.number}</button>`).join('')}</div>` : ''}</div></div>`;
+    ${loading ? '<div class="detail-loading" role="status">正在获取选集…</div>' : episodes.length ? `<h2>选集</h2><div class="episode-grid">${episodes.map((item, index) => episodeCell(item, index)).join('')}</div>` : ''}</div></div>`;
   hydrateImages();
+  if (!loading && episodes.length && data.id) ensureDownloadStatus(String(data.id));
+}
+
+const downloadGlyphs = { idle: '⭳', done: '✓', error: '↻' };
+function episodeCell(item, index) {
+  const info = downloadStates[item.number] || {};
+  const stateName = info.state || 'idle';
+  const glyph = stateName === 'downloading' ? `${info.percent || 0}%` : downloadGlyphs[stateName] || '⭳';
+  return `<div class="episode-cell dl-${stateName}" data-ep-cell="${item.number}" style="--dl:${info.percent || 0}%">
+    <button type="button" class="episode-play${index === 0 ? ' active' : ''}" data-episode="${item.number}">${item.number}</button>
+    <button type="button" class="episode-download" data-download="${item.number}" aria-label="${downloadLabel(stateName, item.number)}">${glyph}</button>
+  </div>`;
+}
+function downloadLabel(stateName, number) {
+  if (stateName === 'downloading') return `第 ${number} 集下载中，点击取消`;
+  if (stateName === 'done') return `第 ${number} 集已下载`;
+  return `下载第 ${number} 集`;
+}
+function updateEpisodeCell(number) {
+  const cell = content.querySelector(`[data-ep-cell="${number}"]`);
+  if (!cell) return;
+  const info = downloadStates[number] || {};
+  const stateName = info.state || 'idle';
+  cell.className = `episode-cell dl-${stateName}`;
+  cell.style.setProperty('--dl', `${info.percent || 0}%`);
+  const button = cell.querySelector('.episode-download');
+  button.textContent = stateName === 'downloading' ? `${info.percent || 0}%` : downloadGlyphs[stateName] || '⭳';
+  button.setAttribute('aria-label', downloadLabel(stateName, number));
+}
+function applyDownloadStates() {
+  content.querySelectorAll('[data-ep-cell]').forEach(cell => updateEpisodeCell(Number(cell.dataset.epCell)));
+}
+async function ensureDownloadStatus(id) {
+  if (downloadStatusId === id) { applyDownloadStates(); return; }
+  downloadStatusId = id;
+  downloadStates = {};
+  try {
+    const map = await api('download-status', { id });
+    if (!state.detail || String(state.detail.id) !== id) return;
+    downloadStates = {};
+    Object.keys(map || {}).forEach(ep => { downloadStates[ep] = map[ep]; });
+    applyDownloadStates();
+  } catch (error) { /* 状态获取失败时保持默认未下载 */ }
+}
+async function toggleDownload(number) {
+  const detail = state.detail;
+  if (!detail) return;
+  const info = downloadStates[number] || {};
+  if (info.state === 'downloading') {
+    try { await api('cancel-download', { id: detail.id, episode: number }); } catch (error) { toast(error.message, true); return; }
+    downloadStates[number] = { state: 'idle', percent: 0 };
+    updateEpisodeCell(number);
+    return;
+  }
+  if (info.state === 'done') { toast(`第 ${number} 集已下载，播放即离线`); return; }
+  downloadStates[number] = { state: 'downloading', percent: 0 };
+  updateEpisodeCell(number);
+  try { await api('download-episode', { id: detail.id, episode: number, title: detail.title, cover: detail.cover }); }
+  catch (error) { downloadStates[number] = { state: 'error', percent: 0 }; updateEpisodeCell(number); toast(error.message, true); }
+}
+window.hgDownloadProgress = event => {
+  if (!event || !state.detail || String(state.detail.id) !== String(event.id)) return;
+  downloadStates[event.episode] = { state: event.state, percent: event.percent };
+  updateEpisodeCell(event.episode);
+  if (event.state === 'done') toast(`第 ${event.episode} 集已下载`);
+  else if (event.state === 'error') toast(event.error || `第 ${event.episode} 集下载失败`, true);
 }
 
 function searchFeedback() {
@@ -1659,6 +1727,8 @@ document.addEventListener('click', async event => {
   const slide = event.target.closest('[data-slide]');
   if (slide) { const target = Number(slide.dataset.slide); changeBanner(target, target > bannerIndex() ? 1 : -1); return; }
   if (event.target.closest('[data-back]')) { window.hgBack(); return; }
+  const downloadButton = event.target.closest('[data-download]');
+  if (downloadButton) { toggleDownload(Number(downloadButton.dataset.download)); return; }
   const episode = event.target.closest('[data-episode]');
   if (episode) { openPlayer(Number(episode.dataset.episode)); return; }
   if (event.target.closest('[data-play]')) { openPlayer(1); return; }

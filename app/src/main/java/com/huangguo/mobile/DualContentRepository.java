@@ -1,6 +1,7 @@
 package com.huangguo.mobile;
 
 import android.content.Context;
+import com.hongguotv.core.StreamInfo;
 import org.json.JSONObject;
 
 final class DualContentRepository {
@@ -24,6 +25,11 @@ final class DualContentRepository {
     JSONObject search(String term) throws Exception { return privateMode() ? huangguo.search(term) : hongguo.search(term); }
     JSONObject detail(String id) throws Exception { return privateMode() ? huangguo.detail(id) : hongguo.detail(id); }
     JSONObject episode(String id, int number) throws Exception { return privateMode() ? huangguo.episode(id, number) : hongguo.episode(id, number); }
+    boolean isPrivate() { return ContentMode.PRIVATE.equals(source); }
+    StreamInfo episodeStream(String id, int number) throws Exception {
+        if (privateMode()) throw new IllegalStateException("该内容不支持此下载方式");
+        return hongguo.episodeStream(id, number);
+    }
     String coverData(String url) throws Exception { return privateMode() ? huangguo.coverData(url) : hongguo.coverData(url); }
     JSONObject tags() throws Exception {
         return privateMode() ? huangguo.tags() : hongguo.tags();

@@ -94,6 +94,7 @@ public final class PlayerActivity extends Activity {
     private final Map<String, Bitmap> posterCache = new HashMap<>();
     private DualContentRepository repository;
     private AppStore store;
+    private Downloads downloads;
     private ExoPlayer player;
     private ExoPlayer previewPlayer;
     private FrameLayout root;
@@ -245,6 +246,7 @@ public final class PlayerActivity extends Activity {
         }
         repository = new DualContentRepository(this);
         store = new AppStore(this);
+        downloads = Downloads.get(this);
         try {
             JSONObject payload = new JSONObject(getIntent().getStringExtra("payload"));
             ContentMode.get(this).require(payload.optString("source", ContentMode.get(this).active()));
@@ -868,6 +870,11 @@ public final class PlayerActivity extends Activity {
 
     private boolean isAiQueue() { return "ai-huanlian".equals(group) || "ai-mogai".equals(group); }
     private String cacheKey(String id, int episode) { return id + ":" + episode; }
+    /** Prefer a finished offline download; fall back to resolving the remote stream. */
+    private JSONObject resolveEpisode(String id, int episode) throws Exception {
+        JSONObject local = downloads.localSource(store.source, id, episode);
+        return local != null ? local : repository.episode(id, episode);
+    }
 
     private Selection adjacent(int direction) {
         if (isAiQueue()) {
@@ -1148,7 +1155,7 @@ public final class PlayerActivity extends Activity {
             try {
                 JSONObject data;
                 synchronized (episodeCache) { data = episodeCache.get(key); }
-                if (data == null) data = repository.episode(id, episode);
+                if (data == null) data = resolveEpisode(id, episode);
                 if (Thread.currentThread().isInterrupted()) return;
                 JSONObject ready = data;
                 synchronized (episodeCache) { episodeCache.put(key, ready); }
@@ -1193,7 +1200,7 @@ public final class PlayerActivity extends Activity {
             try {
                 JSONObject data;
                 synchronized (episodeCache) { data = episodeCache.get(key); }
-                if (data == null) data = repository.episode(id, next.episode);
+                if (data == null) data = resolveEpisode(id, next.episode);
                 if (Thread.currentThread().isInterrupted()) return;
                 JSONObject ready = data;
                 synchronized (episodeCache) { episodeCache.put(key, ready); }

@@ -71,6 +71,12 @@ final class HongguoRepository {
                 .put("mimeType", "video/mp4").put("quality", info.getQuality())
                 .put("title", detail.getSeries().getTitle()).put("cover", detail.getSeries().getCover());
     }
+    StreamInfo episodeStream(String id, int number) throws Exception {
+        Detail detail = details.get(id);
+        if (detail == null) { detail = upstream.detail(id); details.put(id, detail); }
+        if (number < 1 || number > detail.getEpisodes().size()) throw new IllegalArgumentException("无效集数");
+        return upstream.stream(detail.getEpisodes().get(number - 1), 1080);
+    }
     String coverData(String url) throws Exception {
         if (!url.startsWith("https://")) throw new IllegalArgumentException("无效封面地址");
         Request request = new Request.Builder().url(url).header("User-Agent", "Mozilla/5.0").build();
