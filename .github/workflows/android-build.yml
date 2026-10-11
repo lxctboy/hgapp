@@ -26,6 +26,9 @@ jobs:
 
       - name: 安装 Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 默认会尝试安装已废弃的 "tools" 包导致失败,这里只装 platform-tools
+          packages: platform-tools
 
       - name: 安装所需 SDK 组件 (compileSdk 37)
         run: |
