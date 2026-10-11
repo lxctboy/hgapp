@@ -189,10 +189,10 @@ public final class MainActivity extends Activity {
         });
         webView.addJavascriptInterface(new Bridge(), "AndroidHost");
         downloads = Downloads.get(this);
-        downloads.setListener((source, id, episode, percent, state, error) -> {
+        downloads.setListener((source, id, episode, percent, jobState, error) -> {
             try {
                 JSONObject event = new JSONObject().put("source", source).put("id", id)
-                        .put("episode", episode).put("percent", percent).put("state", state);
+                        .put("episode", episode).put("percent", percent).put("state", jobState);
                 if (error != null) event.put("error", error);
                 String script = "window.hgDownloadProgress && window.hgDownloadProgress(" + event + ")";
                 runOnUiThread(() -> { if (!isDestroyed() && webView != null) webView.evaluateJavascript(script, null); });
