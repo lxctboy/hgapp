@@ -30,19 +30,11 @@ jobs:
           # 默认会装已废弃的 "tools" 包导致失败;传空字符串跳过附加包,只保留 cmdline-tools
           packages: ''
 
-      - name: 安装所需 SDK 组件 (compileSdk 37)
+      - name: 安装所需 SDK 组件 (compileSdk 36)
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "cmdline-tools;latest" "platform-tools" > /dev/null 2>&1 || true
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          # 平台必须装好:自定义的 compileHongguoCore 任务要用 android-37 的 android.jar。
-          # 用 --channel=3 覆盖 stable/beta/dev/canary 所有通道,预览版平台也能拿到。
-          if ! sdkmanager --channel=3 "platforms;android-37"; then
-            echo "::error::所有通道都找不到 platforms;android-37。当前可安装的平台如下:"
-            sdkmanager --list 2>/dev/null | grep -oE "platforms;android-[0-9A-Za-z]+" | sort -u -V || true
-            exit 1
-          fi
-          sdkmanager --channel=3 "build-tools;37.0.0" || sdkmanager "build-tools;36.0.0" || true
+          # 平台必须装好:自定义的 compileHongguoCore 任务要用对应 android.jar
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: 安装 Kotlin 编译器 (给 compileHongguoCore 用)
         run: |

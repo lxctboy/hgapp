@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace 'com.huangguo.mobile'
-    compileSdk 37
+    compileSdk 36
 
     defaultConfig {
         applicationId 'com.huangguo.mobile'
@@ -35,8 +35,10 @@ def compileHongguo = tasks.register('compileHongguoCore', Exec) {
     outputs.file(hongguoJar)
     doFirst {
         def sdkPath = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT') ?: "${System.getenv('LOCALAPPDATA')}/Android/Sdk"
-        def platform = file("${sdkPath}/platforms/android-37.0/android.jar")
-        if (!platform.exists()) platform = file("${sdkPath}/platforms/android-37/android.jar")
+        // 跟随 compileSdk,避免平台版本与 SDK 配置脱节
+        def api = android.compileSdk
+        def platform = file("${sdkPath}/platforms/android-${api}/android.jar")
+        if (!platform.exists()) platform = file("${sdkPath}/platforms/android-${api}.0/android.jar")
         commandLine 'python', '-X', 'utf8', file('../scripts/build-hongguo-core.py'),
                 '--classpath', (configurations.hongguoCompile.files + [platform]).collect { it.absolutePath }.join(File.pathSeparator),
                 '--output', hongguoJar.get().asFile.absolutePath
