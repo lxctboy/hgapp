@@ -309,10 +309,9 @@ final class Downloads {
             try {
                 downloadSegments(parts, segments);
                 if (cancelled) return null;
-                File merged = new File(parts, "merged.ts");
-                concatSegments(parts, segments.size(), merged);
+                // 逐个片段分别读取写入,避免直接字节拼接导致 PTS 不连续(MediaExtractor 读到拼接边界会提前停止)
                 File tmpOut = new File(parts, "out.mp4");
-                remuxToMp4(merged, tmpOut);
+                remuxSegmentsToMp4(parts, segments.size(), tmpOut);
                 if (cancelled) return null;
                 File out = new File(dir, outputName(title, episode));
                 out.delete();
@@ -323,60 +322,86 @@ final class Downloads {
             }
         }
 
-        private void concatSegments(File dir, int count, File merged) throws Exception {
-            byte[] buffer = new byte[1 << 16];
-            try (java.io.FileOutputStream out = new java.io.FileOutputStream(merged)) {
-                for (int i = 0; i < count; i++) {
-                    if (cancelled) throw new java.io.IOException("已取消");
-                    File seg = new File(dir, String.format(java.util.Locale.ROOT, "seg%04d.ts", i));
-                    try (java.io.FileInputStream in = new java.io.FileInputStream(seg)) {
-                        int n; while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
-                    }
-                }
-            }
-        }
-
-        private void remuxToMp4(File ts, File out) throws Exception {
-            android.media.MediaExtractor extractor = new android.media.MediaExtractor();
+        /**
+         * 将目录中 seg0000.ts ... segNNNN.ts 逐片段重封装为单个 mp4。
+         * 每个 ts 片段的 PTS 通常独立从 0 开始,必须累加偏移写入,否则时间轴重叠会导致 muxer 停止或播放异常。
+         */
+        private void remuxSegmentsToMp4(File dir, int count, File out) throws Exception {
             android.media.MediaMuxer muxer = null;
+            android.media.MediaExtractor extractor = null;
             try {
-                extractor.setDataSource(ts.getAbsolutePath());
-                int trackCount = extractor.getTrackCount();
                 muxer = new android.media.MediaMuxer(out.getAbsolutePath(), android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-                int[] map = new int[trackCount];
-                java.util.Arrays.fill(map, -1);
-                int maxInput = 1 << 20, added = 0;
-                for (int i = 0; i < trackCount; i++) {
-                    android.media.MediaFormat format = extractor.getTrackFormat(i);
-                    String mime = format.getString(android.media.MediaFormat.KEY_MIME);
-                    if (mime == null || !(mime.startsWith("video/") || mime.startsWith("audio/"))) continue;
-                    extractor.selectTrack(i);
-                    map[i] = muxer.addTrack(format);
-                    added++;
-                    if (format.containsKey(android.media.MediaFormat.KEY_MAX_INPUT_SIZE))
-                        maxInput = Math.max(maxInput, format.getInteger(android.media.MediaFormat.KEY_MAX_INPUT_SIZE));
-                }
-                if (added == 0) throw new IllegalStateException("视频轨道解析失败,无法合并为 mp4");
-                muxer.start();
+                int[] trackMap = null;
+                int maxInput = 1 << 20;
+                long ptsOffsetUs = 0;
+                boolean muxerStarted = false;
                 java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(maxInput);
                 android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
-                while (!cancelled) {
-                    int track = extractor.getSampleTrackIndex();
-                    if (track < 0) break;
-                    int size = extractor.readSampleData(buffer, 0);
-                    if (size < 0) break;
-                    info.offset = 0;
-                    info.size = size;
-                    info.presentationTimeUs = extractor.getSampleTime();
-                    info.flags = (extractor.getSampleFlags() & android.media.MediaExtractor.SAMPLE_FLAG_SYNC) != 0
-                            ? android.media.MediaCodec.BUFFER_FLAG_KEY_FRAME : 0;
-                    if (map[track] >= 0) muxer.writeSampleData(map[track], buffer, info);
-                    extractor.advance();
+
+                for (int segIdx = 0; segIdx < count && !cancelled; segIdx++) {
+                    File seg = new File(dir, String.format(java.util.Locale.ROOT, "seg%04d.ts", segIdx));
+                    if (!seg.isFile()) continue;
+
+                    extractor = new android.media.MediaExtractor();
+                    extractor.setDataSource(seg.getAbsolutePath());
+                    int trackCount = extractor.getTrackCount();
+                    if (trackCount == 0) { extractor.release(); continue; }
+
+                    if (!muxerStarted) {
+                        // 第一个片段:建立轨道映射
+                        trackMap = new int[trackCount];
+                        java.util.Arrays.fill(trackMap, -1);
+                        for (int t = 0; t < trackCount; t++) {
+                            android.media.MediaFormat format = extractor.getTrackFormat(t);
+                            String mime = format.getString(android.media.MediaFormat.KEY_MIME);
+                            if (mime != null && (mime.startsWith("video/") || mime.startsWith("audio/"))) {
+                                trackMap[t] = muxer.addTrack(format);
+                                if (format.containsKey(android.media.MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                                    int mis = format.getInteger(android.media.MediaFormat.KEY_MAX_INPUT_SIZE);
+                                    if (mis > maxInput) { maxInput = mis; buffer = java.nio.ByteBuffer.allocate(maxInput); }
+                                }
+                            }
+                        }
+                        muxer.start();
+                        muxerStarted = true;
+                    }
+
+                    for (int t = 0; t < trackCount; t++) extractor.selectTrack(t);
+
+                    long segMaxPts = 0;
+                    while (!cancelled) {
+                        int size = extractor.readSampleData(buffer, 0);
+                        if (size < 0) break;
+                        int track = extractor.getSampleTrackIndex();
+                        if (track < 0) break;
+
+                        long pts = extractor.getSampleTime();
+                        if (pts < 0) pts = 0;
+
+                        info.offset = 0;
+                        info.size = size;
+                        info.presentationTimeUs = pts + ptsOffsetUs;
+                        info.flags = extractor.getSampleFlags();
+                        if (pts > segMaxPts) segMaxPts = pts;
+
+                        if (track < trackMap.length && trackMap[track] >= 0)
+                            muxer.writeSampleData(trackMap[track], buffer, info);
+                        extractor.advance();
+                    }
+
+                    // 下一个片段的 PTS 接在本片段最大 PTS 之后,留 1ms 间隙避免重叠
+                    ptsOffsetUs += segMaxPts + 1000;
+
+                    extractor.release();
+                    extractor = null;
                 }
-                if (!cancelled) muxer.stop();
+
+                if (muxerStarted && !cancelled) {
+                    try { muxer.stop(); } catch (Exception ignored) { }
+                }
             } finally {
                 try { if (muxer != null) muxer.release(); } catch (Exception ignored) { }
-                extractor.release();
+                try { if (extractor != null) extractor.release(); } catch (Exception ignored) { }
             }
         }
 
