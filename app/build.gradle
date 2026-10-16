@@ -2,6 +2,9 @@ plugins {
     id 'com.android.application'
 }
 
+def keystorePath = System.getenv('ANDROID_KEYSTORE')
+def keystoreReady = keystorePath != null && !keystorePath.isEmpty()
+
 android {
     namespace 'com.huangguo.mobile'
     compileSdk 36
@@ -18,6 +21,25 @@ android {
     // Install device regression tests beside the user's signed app, with separate local data.
     if (providers.gradleProperty('playbackQa').isPresent()) {
         buildTypes.debug.applicationIdSuffix = '.playbackqa'
+    }
+
+    // 云端打包签名:CI 把 keystore 以 base64 存在 Secret 里,构建时还原成临时文件并把路径放进
+    // ANDROID_KEYSTORE。本地构建没有这些环境变量时不会创建 signingConfig,
+    // assembleRelease 产出的就是未签名包(AGP 会自动加 -unsigned 后缀)。
+    if (keystoreReady) {
+        signingConfigs {
+            release {
+                storeFile file(keystorePath)
+                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('ANDROID_KEY_PASSWORD')
+            }
+        }
+        buildTypes {
+            release {
+                signingConfig signingConfigs.release
+            }
+        }
     }
 
     compileOptions {

@@ -780,9 +780,35 @@ function renderSettings() {
       <button type="button" data-clear="bookmarks" ${asArray(state.library?.bookmarks).length ? '' : 'disabled'}>清空我的收藏</button></section>
     <section class="update-settings"><div><h2>界面与站点资源</h2><p data-resource-status>后台自动检查，已下载的更新在合适时机启用。</p><button type="button" data-apply-resources hidden>启用已下载资源</button></div><button type="button" data-check-resources>检查资源</button></section>
     <section class="update-settings"><div><h2>应用更新</h2><button type="button" class="app-version ${updateAvailable ? 'has-update' : ''}" data-secret-entry aria-label="当前版本 ${esc(appVersion)}"><span class="app-version-text">版本 ${appVersion ? `v${esc(appVersion)}` : '读取中…'}</span></button><p>启动后自动检查，也可以在这里手动检查。</p></div><button type="button" data-check-update>检查更新</button></section>
-    ${privateMode() ? '<section class="settings-storage"><button type="button" data-return-public>返回红果</button></section>' : ''}<section class="settings-storage"><h2>本地存储</h2><button type="button" data-clear="cache">清理内容缓存</button></section></div>`;
+    ${privateMode() ? '<section class="settings-storage"><button type="button" data-return-public>返回红果</button></section>' : ''}<section class="settings-storage"><h2>本地存储</h2>
+      <div class="storage-location"><div class="storage-location-text"><span>下载保存位置</span><code data-download-path>读取中…</code></div>
+        <div class="storage-location-actions"><button type="button" data-pick-download-dir>更改目录</button><button type="button" data-reset-download-dir hidden>恢复默认</button></div></div>
+      <p class="storage-location-hint" data-download-hint></p>
+      <button type="button" data-clear="cache">清理内容缓存</button></section></div>`;
   api('hot-update-status').then(window.hgHotUpdateStatus).catch(() => {});
+  api('download-location').then(window.hgDownloadLocation).catch(() => {});
 }
+
+/** 把原生返回的保存位置信息填进设置页；custom=false 时展示默认目录并隐藏「恢复默认」。 */
+function updateDownloadLocation(info) {
+  if (!info) return;
+  const path = content.querySelector('[data-download-path]');
+  const hint = content.querySelector('[data-download-hint]');
+  const reset = content.querySelector('[data-reset-download-dir]');
+  const custom = Boolean(info.custom);
+  const current = custom ? (info.current || '自定义目录') : (info.default || '应用私有目录');
+  if (path) path.textContent = current;
+  if (hint) hint.textContent = custom
+    ? '之后的下载会保存到这个目录，可以用文件管理器直接找到。已下载的视频留在原位置，不会自动搬迁。'
+    : '默认是应用私有目录，卸载 App 会一起删掉。点「更改目录」换成文件管理器里看得见的文件夹。';
+  if (reset) reset.hidden = !custom;
+}
+window.hgDownloadLocation = updateDownloadLocation;
+window.hgDownloadChosen = info => {
+  updateDownloadLocation(info);
+  toast(info?.custom ? '下载保存位置已更新' : '目录无法写入，已保持默认位置', !info?.custom);
+};
+window.hgDownloadError = message => toast(message || '保存位置设置失败', true);
 
 function renderAccountManagement() {
   const account = state.account;
@@ -1727,6 +1753,17 @@ document.addEventListener('click', async event => {
   const slide = event.target.closest('[data-slide]');
   if (slide) { const target = Number(slide.dataset.slide); changeBanner(target, target > bannerIndex() ? 1 : -1); return; }
   if (event.target.closest('[data-back]')) { window.hgBack(); return; }
+  if (event.target.closest('[data-pick-download-dir]')) {
+    // 打开系统文件选择器，选完的结果由 window.hgDownloadChosen 回调回来。
+    try { await api('choose-download-dir'); } catch (error) { toast(error.message, true); }
+    return;
+  }
+  if (event.target.closest('[data-reset-download-dir]')) {
+    if (!await askConfirmation('恢复默认保存位置', '之后的下载会回到应用私有目录。已下载的视频保留在原位置，不会被删除。', '恢复')) return;
+    try { updateDownloadLocation(await api('reset-download-dir')); toast('已恢复默认保存位置'); }
+    catch (error) { toast(error.message, true); }
+    return;
+  }
   const downloadButton = event.target.closest('[data-download]');
   if (downloadButton) { toggleDownload(Number(downloadButton.dataset.download)); return; }
   const episode = event.target.closest('[data-episode]');

@@ -36,6 +36,7 @@ final class Downloads {
     private static Downloads instance;
     private final Context app;
     private final SharedPreferences index;
+    private final DownloadLocation location;
     private final OkHttpClient http = new OkHttpClient();
     private final ExecutorService pool = Executors.newFixedThreadPool(WORKERS);
     private final ExecutorService orchestrators = Executors.newCachedThreadPool();
@@ -45,6 +46,7 @@ final class Downloads {
     private Downloads(Context context) {
         app = context.getApplicationContext();
         index = app.getSharedPreferences("downloads-index", Context.MODE_PRIVATE);
+        location = DownloadLocation.get(app);
     }
     static synchronized Downloads get(Context context) {
         if (instance == null) instance = new Downloads(context);
@@ -68,20 +70,32 @@ final class Downloads {
                 if (!entry.getKey().startsWith(prefix)) continue;
                 String episode = entry.getKey().substring(prefix.length());
                 if (result.has(episode)) continue;
-                File file = new File(new JSONObject(String.valueOf(entry.getValue())).optString("path"));
-                if (file.isFile()) result.put(episode, new JSONObject().put("state", "done").put("percent", 100));
+                if (exists(new JSONObject(String.valueOf(entry.getValue()))))
+                    result.put(episode, new JSONObject().put("state", "done").put("percent", 100));
             }
         } catch (Exception error) { Log.w(TAG, "status failed", error); }
         return result;
     }
 
-    /** Local playable source for a finished download, or null. Used by the player for offline playback. */
+    /**
+     * Local playable source for a finished download, or null. Used by the player for offline playback.
+     * 存到用户自定义目录的条目记的是 content:// Uri，应用私有目录的条目记的是文件路径，两种都支持。
+     */
     synchronized JSONObject localSource(String source, String id, int episode) {
         String stored = index.getString(key(source, id, episode), null);
         if (stored == null) return null;
         try {
             JSONObject record = new JSONObject(stored);
-            File file = new File(record.optString("path"));
+            String uriText = record.optString("uri", null);
+            if (uriText != null && !uriText.isEmpty()) {
+                android.net.Uri uri = android.net.Uri.parse(uriText);
+                if (!DownloadLocation.exists(app, uri)) return null;
+                return new JSONObject().put("source", uri.toString())
+                        .put("mimeType", record.optString("mime")).put("local", true);
+            }
+            String path = record.optString("path", null);
+            if (path == null || path.isEmpty()) return null;
+            File file = new File(path);
             if (!file.isFile()) return null;
             return new JSONObject().put("source", android.net.Uri.fromFile(file).toString())
                     .put("mimeType", record.optString("mime")).put("local", true);
@@ -97,8 +111,15 @@ final class Downloads {
         cancel(source, id, episode);
         String stored = index.getString(key(source, id, episode), null);
         if (stored != null) {
-            try { File file = new File(new JSONObject(stored).optString("path")); deleteTree(file.getParentFile(), file); }
-            catch (Exception ignored) { }
+            try {
+                JSONObject record = new JSONObject(stored);
+                String uriText = record.optString("uri", null);
+                if (uriText != null && !uriText.isEmpty()) DownloadLocation.remove(app, android.net.Uri.parse(uriText));
+                else {
+                    String path = record.optString("path", null);
+                    if (path != null && !path.isEmpty()) { File file = new File(path); deleteTree(file.getParentFile(), file); }
+                }
+            } catch (Exception ignored) { }
         }
         index.edit().remove(key(source, id, episode)).apply();
     }
@@ -115,11 +136,15 @@ final class Downloads {
     private void finish(Job job, File file, boolean ok, String error) {
         active.remove(key(job.source, job.id, job.episode));
         if (ok && file != null && file.isFile()) {
+            // 优先搬到用户自定义的保存目录；搬不过去就留在应用私有目录，保证下载不丢。
+            android.net.Uri external = publish(job, file);
             try {
-                index.edit().putString(key(job.source, job.id, job.episode), new JSONObject()
-                        .put("path", file.getAbsolutePath()).put("mime", job.mime)
+                JSONObject record = new JSONObject().put("mime", job.mime)
                         .put("title", job.title).put("cover", job.cover)
-                        .put("at", System.currentTimeMillis()).toString()).apply();
+                        .put("at", System.currentTimeMillis());
+                if (external != null) { record.put("uri", external.toString()); deleteTree(file.getParentFile(), file); }
+                else record.put("path", file.getAbsolutePath());
+                index.edit().putString(key(job.source, job.id, job.episode), record.toString()).apply();
             } catch (Exception ignored) { }
             report(job, 100, "done", null);
         } else {
@@ -143,12 +168,53 @@ final class Downloads {
         if (dir != null && dir.isDirectory()) { File[] rest = dir.listFiles(); if (rest == null || rest.length == 0) dir.delete(); }
     }
 
+    /** 应用私有目录：既用作下载时的落地位置，也是没自定义目录时的最终位置。 */
     private File episodeDir(Job job) {
         File root = app.getExternalFilesDir(null);
         if (root == null) root = app.getFilesDir();
         File base = new File(root, "downloads/" + job.source + "/" + job.id);
         base.mkdirs();
         return base;
+    }
+
+    /**
+     * 把下载好的文件复制进用户自定义目录。
+     * 返回目标 Uri；没设置目录、授权失效或写入失败都返回 null（调用方会把文件留在私有目录）。
+     */
+    private android.net.Uri publish(Job job, File file) {
+        if (!location.usable()) return null;
+        android.net.Uri target = location.create(job.mime, outputName(job.title, job.episode));
+        if (target == null) return null;
+        if (location.copy(file, target)) return target;
+        DownloadLocation.remove(app, target); // 半截文件不留垃圾
+        return null;
+    }
+
+    /** 索引里的一条记录对应的文件还在不在。 */
+    private boolean exists(JSONObject record) {
+        String uriText = record.optString("uri", null);
+        if (uriText != null && !uriText.isEmpty()) return DownloadLocation.exists(app, android.net.Uri.parse(uriText));
+        String path = record.optString("path", null);
+        return path != null && !path.isEmpty() && new File(path).isFile();
+    }
+
+    /** 设置页展示用：当前保存位置 + 是否自定义 + 默认目录。 */
+    JSONObject locationInfo() throws Exception {
+        String current = location.display();
+        String fallback = defaultDir().getAbsolutePath();
+        return new JSONObject().put("custom", current != null)
+                .put("current", current == null ? JSONObject.NULL : current)
+                .put("default", fallback);
+    }
+
+    /** 用户点了「恢复默认」后清掉授权。 */
+    void resetLocation() { location.clear(); }
+
+    /** 默认目录：应用私有目录下的 downloads/。卸载 App 会一起删掉。 */
+    private File defaultDir() {
+        File root = app.getExternalFilesDir(null);
+        if (root == null) root = app.getFilesDir();
+        return new File(root, "downloads");
     }
 
     private static final class RangeResult { final byte[] bytes; final long total; RangeResult(byte[] b, long t) { bytes = b; total = t; } }

@@ -45,6 +45,7 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final String TAG = "HuangGuo";
     private static final int AVATAR_PICKER = 7101;
+    private static final int DOWNLOAD_DIR_PICKER = 7102;
     private final ExecutorService requests = Executors.newFixedThreadPool(4);
     private final ExecutorService localRequests = Executors.newSingleThreadExecutor();
     private final ExecutorService coverRequests = Executors.newFixedThreadPool(2);
@@ -315,17 +316,39 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != AVATAR_PICKER || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri selected = data.getData();
-        requests.execute(() -> {
-            try {
-                JSONObject profile = account.setAvatar(selected);
-                runOnUiThread(() -> webView.evaluateJavascript("window.hgAvatarUpdated && window.hgAvatarUpdated(" + profile + ")", null));
-            } catch (Exception error) {
-                String script = "window.hgAvatarError && window.hgAvatarError(" + JSONObject.quote(error.getMessage() == null ? "头像保存失败" : error.getMessage()) + ")";
-                runOnUiThread(() -> webView.evaluateJavascript(script, null));
-            }
-        });
+        if (requestCode == AVATAR_PICKER) {
+            requests.execute(() -> {
+                try {
+                    JSONObject profile = account.setAvatar(selected);
+                    runOnUiThread(() -> webView.evaluateJavascript("window.hgAvatarUpdated && window.hgAvatarUpdated(" + profile + ")", null));
+                } catch (Exception error) {
+                    String script = "window.hgAvatarError && window.hgAvatarError(" + JSONObject.quote(error.getMessage() == null ? "头像保存失败" : error.getMessage()) + ")";
+                    runOnUiThread(() -> webView.evaluateJavascript(script, null));
+                }
+            });
+            return;
+        }
+        if (requestCode == DOWNLOAD_DIR_PICKER) {
+            // 拿到目录后必须显式持久化授权，否则下次启动就写不进去了。
+            requests.execute(() -> {
+                try {
+                    getContentResolver().takePersistableUriPermission(selected,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    DownloadLocation.get(this).save(selected);
+                    JSONObject info = downloads.locationInfo();
+                    runOnUiThread(() -> webView.evaluateJavascript("window.hgDownloadChosen && window.hgDownloadChosen(" + info + ")", null));
+                } catch (Exception error) {
+                    Log.w(TAG, "设置下载目录失败", error);
+                    notifyScript("window.hgDownloadError && window.hgDownloadError(" + JSONObject.quote("这个目录无法写入，换一个试试") + ")");
+                }
+            });
+        }
+    }
+
+    private void notifyScript(String script) {
+        runOnUiThread(() -> { if (!isDestroyed() && webView != null) webView.evaluateJavascript(script, null); });
     }
 
     private void installUpdate(File apk) {
@@ -617,6 +640,15 @@ public final class MainActivity extends Activity {
             case "download-status": return downloads.status(mode.active(), args.optString("id"));
             case "cancel-download": downloads.cancel(mode.active(), args.optString("id"), args.optInt("episode", 1)); return true;
             case "delete-download": downloads.remove(mode.active(), args.optString("id"), args.optInt("episode", 1)); return true;
+            case "download-location": return downloads.locationInfo();
+            case "reset-download-dir": downloads.resetLocation(); return downloads.locationInfo();
+            case "choose-download-dir": {
+                runOnUiThread(() -> {
+                    try { startActivityForResult(DownloadLocation.picker(), DOWNLOAD_DIR_PICKER); }
+                    catch (ActivityNotFoundException error) { notifyScript("window.hgDownloadError && window.hgDownloadError(" + JSONObject.quote("这台设备没有可用的文件管理器") + ")"); }
+                });
+                return true;
+            }
             default: throw new IllegalArgumentException("未知请求");
         }
     }

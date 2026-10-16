@@ -1,14 +1,34 @@
-name: Android Build
+name: Build Android APK
 
-# 手动触发,或推送到 main / master 时自动构建
+# 三种触发方式:
+#   1. 推送到 main / master —— 构建并把 APK 挂到 Actions 产物上
+#   2. 推送 v* 标签        —— 顺带创建一个 GitHub Release
+#   3. 手动触发           —— 右上角 Run workflow,可勾选「发布 Release」
 on:
-  workflow_dispatch:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 构建后同时发布 Release
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # 签名用的密钥放在仓库 Secret 里,没配置就产出未签名的 release 包。
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -19,6 +39,8 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # compileHongguoCore 这个自定义任务会调用 python 编译 third_party/hongguo 下的 Kotlin 源码,
+      # 同时这里会让 PATH 里出现可直接使用的 python(不是 python3)。
       - name: 安装 Python
         uses: actions/setup-python@v5
         with:
@@ -43,14 +65,77 @@ jobs:
           unzip -q /tmp/kotlin-compiler.zip -d "$HOME/kotlin"
           echo "KOTLIN_HOME=$HOME/kotlin/kotlinc" >> "$GITHUB_ENV"
 
+      - name: 缓存 Gradle 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties', 'gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # Secret 里存的是 keystore 的 base64,构建时还原成文件再交给 Gradle。
+      - name: 还原签名密钥
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing.keystore"
+          echo "ANDROID_KEYSTORE=$RUNNER_TEMP/signing.keystore" >> "$GITHUB_ENV"
+
       - name: 构建 Debug APK
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: 上传 APK
+      - name: 构建 Release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: 整理产物并读取版本号
+        id: dist
+        run: |
+          set -euo pipefail
+          # 版本号直接从 app/build.gradle 里读,避免依赖额外插件
+          VERSION=$(sed -n "s/^[[:space:]]*versionName[[:space:]]*'\([^']*\)'.*/\1/p" app/build.gradle | head -1)
+          CODE=$(sed -n "s/^[[:space:]]*versionCode[[:space:]]*\([0-9]*\).*/\1/p" app/build.gradle | head -1)
+          SHORT=$(git rev-parse --short HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=v${VERSION}-${CODE}-${SHORT}" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+          for apk in app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk; do
+            [ -f "$apk" ] || continue
+            variant=$(basename "$(dirname "$apk")")
+            cp "$apk" "dist/ChengZi-Android-v${VERSION}-${variant}.apk"
+          done
+          ls -lh dist
+
+      - name: 上传 Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: ${{ steps.dist.outputs.build }}-debug
+          path: dist/ChengZi-Android-*-debug.apk
           if-no-files-found: error
+
+      - name: 上传 Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dist.outputs.build }}-release
+          path: dist/ChengZi-Android-*-release.apk
+          if-no-files-found: error
+
+      # 只有推送 v* 标签,或手动触发时勾了「发布 Release」才会走这一步。
+      # 手动触发且没给标签时,自动用 版本号-commit短SHA 建一个标签。
+      - name: 发布 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ steps.dist.outputs.build }}"
+            git config user.name github-actions
+            git config user.email github-actions@github.com
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          gh release create "$TAG" dist/*.apk --generate-notes --title "$TAG"
