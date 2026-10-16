@@ -40,7 +40,15 @@ CI 打包时会优先使用仓库 Secret 里的正式密钥；**未配置时自�
 | `ANDROID_KEYSTORE_BASE64` | keystore 文件的 base64（单行） |
 | `ANDROID_KEYSTORE_PASSWORD` | 密钥库密码 |
 | `ANDROID_KEY_ALIAS` | 密钥别名 |
-| `ANDROID_KEY_PASSWORD` | 密钥密码 |
+| `ANDROID_KEY_PASSWORD` | 密钥密码（**PKCS12 下会被忽略**，见下方说明） |
+
+> 本仓库使用的密钥库为 **PKCS12**（`.p12`）。PKCS12 内部没有独立的密钥口令，
+> 解锁密钥用的就是库口令，因此 Gradle 在检测到 PKCS12 时会忽略
+> `ANDROID_KEY_PASSWORD`、直接使用 `ANDROID_KEYSTORE_PASSWORD`。
+> 若密钥为 JKS，两个口令才会分别生效。
+>
+> 格式由**文件魔数**判定（JKS 为 `FEEDFEED`），不依赖扩展名，
+> 因此 CI 把密钥还原成 `signing.keystore` 这种名字也能正确识别。
 
 本机没有 JDK（`keytool`）时，可用自带脚本生成等价密钥库：
 

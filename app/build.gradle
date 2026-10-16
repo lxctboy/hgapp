@@ -5,6 +5,19 @@ plugins {
 def keystorePath = System.getenv('ANDROID_KEYSTORE')
 def keystoreReady = keystorePath != null && !keystorePath.isEmpty()
 
+// 判定密钥库格式:JKS 文件固定以魔数 0xFEEDFEED 开头,其余一律按 PKCS12 处理。
+// 不能按扩展名判断 —— CI 会把还原出来的库写成 signing.keystore,扩展名与实际格式无关。
+def keystoreFormat = { String path ->
+    def file = new File(path)
+    if (!file.exists() || file.length() < 4) return 'pkcs12'
+    def head = new byte[4]
+    file.withInputStream { it.read(head) }
+    def isJks = (head[0] & 0xff) == 0xFE && (head[1] & 0xff) == 0xED &&
+                (head[2] & 0xff) == 0xFE && (head[3] & 0xff) == 0xED
+    return isJks ? 'jks' : 'pkcs12'
+}
+def keystoreType = keystoreReady ? keystoreFormat(keystorePath) : 'jks'
+
 android {
     namespace 'com.huangguo.mobile'
     compileSdk 36
@@ -26,13 +39,14 @@ android {
     signingConfigs {
         hongguo {
             if (keystoreReady) {
+                def storePass = System.getenv('ANDROID_KEYSTORE_PASSWORD')
                 storeFile file(keystorePath)
-                // keytool 生成的默认为 JKS;本机无 JDK,用 PKCS12 生成的 .p12 需显式声明类型,
-                // 否则 AGP 按默认的 jks 去读会直接报错。
-                storeType keystorePath ==~ /(?i).*\.(p12|pfx)$/ ? 'pkcs12' : 'jks'
-                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                storeType keystoreType
+                storePassword storePass
                 keyAlias System.getenv('ANDROID_KEY_ALIAS')
-                keyPassword System.getenv('ANDROID_KEY_PASSWORD')
+                // PKCS12 里没有独立的密钥口令,解锁密钥用的就是库口令;
+                // 若照搬 JKS 习惯另设一个不同口令,打包会报 UnrecoverableKeyException。
+                keyPassword keystoreType == 'pkcs12' ? storePass : System.getenv('ANDROID_KEY_PASSWORD')
             }
         }
     }
