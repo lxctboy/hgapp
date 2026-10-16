@@ -19,7 +19,9 @@ import java.util.Locale;
 import java.util.regex.Pattern;
 
 final class UpdateManager {
-    private static final String RELEASE_BASE = "https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/";
+    // 原仓库 MrSsg/HuangguoAPP-for-Andriod 已不存在(访问返回 404),
+    // 更新清单指向当前维护中的仓库。
+    private static final String RELEASE_BASE = "https://github.com/lxctboy/hgapp/releases/";
     private static final String MANIFEST_URL = RELEASE_BASE + "latest/download/android-update.json";
     private static final Pattern VERSION = Pattern.compile("\\d+\\.\\d+\\.\\d+");
     private static final long AUTO_INTERVAL_MS = 12 * 60 * 60 * 1000L;

@@ -12,7 +12,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/MrSsg/HuangguoAPP-for-Andriod/releases/latest) 下载 ChengZi-Android-v版本号-release.apk，在 Android 8.0 或更高版本设备上安装。后续可在应用设置中检查更新。
+从 [Releases](https://github.com/lxctboy/hgapp/releases/latest) 下载 ChengZi-Android-v版本号-release.apk，在 Android 8.0 或更高版本设备上安装。后续可在应用设置中检查更新。
 
 首次安装时，按系统提示允许当前下载工具安装应用。
 
