@@ -23,7 +23,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # 签名用的密钥放在仓库 Secret 里,没配置就产出未签名的 release 包。
+      # 签名用的密钥放在仓库 Secret 里,没配置时 release 自动回退到 debug 签名(仍可安装)。
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}

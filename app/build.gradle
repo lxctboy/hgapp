@@ -23,22 +23,23 @@ android {
         buildTypes.debug.applicationIdSuffix = '.playbackqa'
     }
 
-    // 云端打包签名:CI 把 keystore 以 base64 存在 Secret 里,构建时还原成临时文件并把路径放进
-    // ANDROID_KEYSTORE。本地构建没有这些环境变量时不会创建 signingConfig,
-    // assembleRelease 产出的就是未签名包(AGP 会自动加 -unsigned 后缀)。
-    if (keystoreReady) {
-        signingConfigs {
-            release {
+    signingConfigs {
+        hongguo {
+            if (keystoreReady) {
                 storeFile file(keystorePath)
                 storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
                 keyAlias System.getenv('ANDROID_KEY_ALIAS')
                 keyPassword System.getenv('ANDROID_KEY_PASSWORD')
             }
         }
-        buildTypes {
-            release {
-                signingConfig signingConfigs.release
-            }
+    }
+
+    // 云端打包签名:CI 把 keystore 以 base64 存在 Secret 里,构建时还原成临时文件并把路径放进
+    // ANDROID_KEYSTORE。Secret 没配时回退到 debug 签名,保证 assembleRelease 产出的包一定能装上
+    // (未签名包会被系统以 INSTALL_PARSE_FAILED_NO_CERTIFICATES 直接拒掉)。
+    buildTypes {
+        release {
+            signingConfig keystoreReady ? signingConfigs.hongguo : signingConfigs.debug
         }
     }
 
