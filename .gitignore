@@ -15,6 +15,14 @@ verification/
 
 qa/*-browser/
 
+# 签名密钥:私钥一旦进仓库就永久泄露,必须从密钥管理中吊销。
+# 正式 keystore 存于仓库外 D:/project/keystores/,这里只做兜底拦截。
+*.jks
+*.keystore
+*.p12
+*.pfx
+*signing*.txt
+
 # Local notes and generated evidence
 *.md
 !/README.md

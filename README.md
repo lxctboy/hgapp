@@ -28,6 +28,32 @@
 
 调试包位于 app/build/outputs/apk/debug/。自行分发时请使用自己的签名配置。
 
+## 云构建签名配置
+
+CI 打包时会优先使用仓库 Secret 里的正式密钥；**未配置时自动回退 debug 签名**，
+保证产物一定能安装（未签名包会被系统以 `INSTALL_PARSE_FAILED_NO_CERTIFICATES` 拒绝）。
+
+需要正式签名时，在仓库 **Settings → Secrets and variables → Actions** 添加四个 Secret：
+
+| Secret | 说明 |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | keystore 文件的 base64（单行） |
+| `ANDROID_KEYSTORE_PASSWORD` | 密钥库密码 |
+| `ANDROID_KEY_ALIAS` | 密钥别名 |
+| `ANDROID_KEY_PASSWORD` | 密钥密码 |
+
+本机没有 JDK（`keytool`）时，可用自带脚本生成等价密钥库：
+
+```powershell
+python scripts/gen-keystore.py
+```
+
+脚本会在**仓库外**的 `D:\project\keystores\` 生成密钥库与 `hgapp-signing.txt`
+（内含可直接粘贴的 Secret 值）。该目录已被 `.gitignore` 兜底拦截，切勿提交。
+
+> 密钥丢失将无法向用户推送更新，请自行备份 `hgapp.p12` 与密码。
+> 密钥文件为 PKCS12 格式，Gradle 会按扩展名自动切换 `storeType`。
+
 ## 许可与致谢
 
 本项目按 [GPL-3.0-only](LICENSE) 提供源码。内容适配代码使用了 [N3urda/hongguoTV](https://github.com/N3urda/hongguoTV) 的部分代码，来源及版权说明见 [第三方声明](third_party/hongguo/NOTICE.txt)。

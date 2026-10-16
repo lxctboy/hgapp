@@ -27,6 +27,9 @@ android {
         hongguo {
             if (keystoreReady) {
                 storeFile file(keystorePath)
+                // keytool 生成的默认为 JKS;本机无 JDK,用 PKCS12 生成的 .p12 需显式声明类型,
+                // 否则 AGP 按默认的 jks 去读会直接报错。
+                storeType keystorePath ==~ /(?i).*\.(p12|pfx)$/ ? 'pkcs12' : 'jks'
                 storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
                 keyAlias System.getenv('ANDROID_KEY_ALIAS')
                 keyPassword System.getenv('ANDROID_KEY_PASSWORD')
